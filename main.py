@@ -1,11 +1,9 @@
-from nonebot import on_request, on_command
-from nonebot.adapters.onebot.v11 import Bot, Event, GroupRequestEvent
-from nonebot.permission import SUPERUSER
-import time
-import requests
-import re
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from astrbot.api.all import *
+from astrbot.api.event.filter import command, permission_type, event_message_type, EventMessageType, PermissionType
+from astrbot.api.star import StarTools
+from astrbot.api import logger
+import json
+import os
 
 # 自定义配置
 ADMIN_QQS = [1537008949, 1579648302]  # 替换为实际管理员QQ
