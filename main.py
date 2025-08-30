@@ -1,4 +1,6 @@
-from astrbot import Plugin, on, send, permission, Event, Bot
+from astrbot import Plugin, on_request, on_command
+from astrbot.adapters.onebot.v11 import Bot, Event, GroupRequestEvent
+from astrbot.permission import SUPERUSER
 import json
 import time
 import requests
@@ -7,7 +9,7 @@ from requests.adapters import HTTPAdapter
 from requests.packages.urllib3.util.retry import Retry
 
 # 初始化插件
-plugin = Plugin("group_manager", "群管理插件，处理加群请求和成员管理")
+plugin = Plugin("group_manager", "群管理插件（带卡密验证功能）")
 
 # 自定义配置
 ADMIN_QQS = [1537008949, 1579648302]  # 管理员QQ
@@ -20,21 +22,16 @@ api_session = requests.Session()
 retries = Retry(total=API_RETRIES, backoff_factor=1)
 api_session.mount('https://', HTTPAdapter(max_retries=retries))
 
-# 权限检查函数
-def is_admin(event: Event) -> bool:
-    """检查是否为管理员或超级用户"""
-    user_id = event.user_id
-    return int(user_id) in ADMIN_QQS or permission.is_superuser(user_id)
-
-#----------加群请求处理----------
-@on("request.group.add")
-async def handle_join_group(event: Event, bot: Bot):
-    """处理加群请求并验证卡密"""
-    data = event.raw
-    group_id = str(data['group_id'])
-    user_qq = str(data['user_id'])
-    comment = data.get('comment', '')
-    flag = data['flag']
+# 加群请求处理
+@on_request(plugin=plugin)
+async def handle_join_group(bot: Bot, event: GroupRequestEvent):
+    # 只处理加群请求
+    if event.sub_type != "add":
+        return
+    
+    group_id = str(event.group_id)
+    user_qq = str(event.user_id)
+    comment = event.comment or ""
     
     # 从备注中提取卡密
     def extract_key(comment):
@@ -47,7 +44,7 @@ async def handle_join_group(event: Event, bot: Bot):
     # 调用API验证卡密
     api_url = f"https://qun.yz01.baby/api/check_key.php?group_id={group_id}&key={key}"
     try:
-        response = requests.get(api_url, timeout=API_TIMEOUT)
+        response = requests.get(api_url)
         result = response.json()
         plugin.logger.info(f"API响应: {result}")
         
@@ -55,16 +52,15 @@ async def handle_join_group(event: Event, bot: Bot):
             # 卡密有效，通过申请
             plugin.logger.info(f"卡密验证通过 - 群号: {group_id}, 用户: {user_qq}, 卡密: {key}")
             
-            # 同意加群请求
             await bot.set_group_add_request(
-                flag=flag,
+                flag=event.flag,
                 sub_type='add',
                 approve=True
             )
             
             # 标记卡密为已使用
             mark_url = f"https://qun.yz01.baby/api/mark_key.php?group_id={group_id}&key={key}&used_by={user_qq}"
-            mark_response = requests.get(mark_url, timeout=API_TIMEOUT)
+            mark_response = requests.get(mark_url)
             plugin.logger.info(f"标记卡密API响应: {mark_response.text}")
             
         else:
@@ -73,9 +69,9 @@ async def handle_join_group(event: Event, bot: Bot):
             plugin.logger.warning(f"卡密验证失败 - 群号: {group_id}, 用户: {user_qq}, 卡密: {key}, 原因: {error_msg}")
             
             reason = '卡密已使用' if error_msg == '卡密已使用' else '卡密错误'
-            
+                
             await bot.set_group_add_request(
-                flag=flag,
+                flag=event.flag,
                 sub_type='add',
                 approve=False,
                 reason=reason
@@ -83,43 +79,43 @@ async def handle_join_group(event: Event, bot: Bot):
             
     except Exception as e:
         plugin.logger.error(f"验证卡密API请求异常: {e}")
-        # 验证失败时拒绝加群
+        # 默认拒绝加群
         await bot.set_group_add_request(
-            flag=flag,
+            flag=event.flag,
             sub_type='add',
             approve=False,
             reason='卡密验证系统暂时不可用，请稍后再试'
         )
 
-#----------获取单个群成员----------
-@on("command", command="获取群成员", aliases=["获取群员QQ"])
-async def get_group_members(event: Event, bot: Bot):
-    """获取指定群的成员信息并同步到数据库"""
+# 获取单个群成员
+@on_command("获取群成员", aliases={"获取群员QQ"}, plugin=plugin)
+async def get_group_members(bot: Bot, event: Event):
     # 权限检查
-    if not is_admin(event):
-        await send(event, "你没有权限执行此操作")
+    user_id = event.get_user_id()
+    if int(user_id) not in ADMIN_QQS and not await SUPERUSER(bot, event):
+        await bot.send(event, "你没有权限执行此操作")
         return
     
     # 提取群号
-    cmd_text = event.message.text.strip()
+    cmd_text = event.get_plaintext().strip()
     match = re.search(r'(\d+)', cmd_text)
     if not match:
-        await send(event, "请指定群号，格式：获取群成员 123456789")
+        await bot.send(event, "请指定群号，格式：获取群成员 123456789")
         return
     
     group_id = match.group(1)
-    await send(event, f"开始获取群 {group_id} 的成员信息...")
+    await bot.send(event, f"开始获取群 {group_id} 的成员信息...")
     
     # 获取成员
     members, error = await fetch_group_members(bot, group_id)
     if error:
-        await send(event, f"获取失败：{error}")
+        await bot.send(event, f"获取失败：{error}")
         return
     
     # 推送成员数据到数据库
     try:
         data = {
-            "bot_qq": bot.uin,
+            "bot_qq": bot.self_id,
             "members": members
         }
         response = api_session.post(
@@ -131,32 +127,32 @@ async def get_group_members(event: Event, bot: Bot):
         result = response.json()
         
         if result.get("status") == "success":
-            await send(event, f"成功记录群 {group_id} 的 {len(members)} 名成员")
+            await bot.send(event, f"成功记录群 {group_id} 的 {len(members)} 名成员")
         else:
-            await send(event, f"记录失败：{result.get('message', '未知错误')}")
+            await bot.send(event, f"记录失败：{result.get('message', '未知错误')}")
     except Exception as e:
-        await send(event, f"推送数据失败：{str(e)}")
+        await bot.send(event, f"推送数据失败：{str(e)}")
 
-#----------获取全部群成员----------
-@on("command", command="获取所有群成员", aliases=["全量更新群成员"])
-async def get_all_group_members(event: Event, bot: Bot):
-    """获取机器人加入的所有群的成员信息并同步到数据库"""
+# 获取全部群成员
+@on_command("获取所有群成员", aliases={"全量更新群成员"}, plugin=plugin)
+async def get_all_group_members(bot: Bot, event: Event):
     # 权限检查
-    if not is_admin(event):
-        await send(event, "你没有权限执行此操作")
+    user_id = event.get_user_id()
+    if int(user_id) not in ADMIN_QQS and not await SUPERUSER(bot, event):
+        await bot.send(event, "你没有权限执行此操作")
         return
     
     try:
         # 获取机器人已加入的所有群
         group_list = await bot.get_group_list()
         if not group_list:
-            await send(event, "机器人未加入任何群")
+            await bot.send(event, "机器人未加入任何群")
             return
         
         total_groups = len(group_list)
         success_count = 0
         failed_groups = []
-        await send(event, f"发现 {total_groups} 个群，开始批量获取成员信息...")
+        await bot.send(event, f"发现 {total_groups} 个群，开始批量获取成员信息...")
         
         # 逐个处理群
         for i, group in enumerate(group_list, 1):
@@ -164,7 +160,7 @@ async def get_all_group_members(event: Event, bot: Bot):
             group_name = group.get('group_name', f"群{group_id}")
             
             # 发送进度提示
-            await send(event, f"正在处理 {group_name}（{i}/{total_groups}）")
+            await bot.send(event, f"正在处理 {group_name}（{i}/{total_groups}）")
             
             # 获取成员
             members, error = await fetch_group_members(bot, group_id)
@@ -176,7 +172,7 @@ async def get_all_group_members(event: Event, bot: Bot):
             try:
                 response = api_session.post(
                     f"{API_BASE_URL}push_group_members.php",
-                    json={"bot_qq": bot.uin, "members": members},
+                    json={"bot_qq": bot.self_id, "members": members},
                     timeout=API_TIMEOUT
                 )
                 response.raise_for_status()
@@ -191,14 +187,13 @@ async def get_all_group_members(event: Event, bot: Bot):
         report = f"批量处理完成！\n成功：{success_count} 个群\n失败：{len(failed_groups)} 个群"
         if failed_groups:
             report += "\n失败详情：\n" + "\n".join(failed_groups)
-        await send(event, report)
+        await bot.send(event, report)
         
     except Exception as e:
-        await send(event, f"执行失败：{str(e)}")
+        await bot.send(event, f"执行失败：{str(e)}")
 
-#----------辅助函数：分页获取单个群成员----------
+# 辅助函数：分页获取单个群成员
 async def fetch_group_members(bot: Bot, group_id: str):
-    """分页获取群成员列表"""
     try:
         all_members = []
         next_token = None
@@ -212,7 +207,7 @@ async def fetch_group_members(bot: Bot, group_id: str):
             # 调用API获取成员列表
             members = await bot.get_group_member_list(** params)
             
-            # 处理不同返回格式
+            # 处理不同适配器的返回格式
             if isinstance(members, list):
                 all_members.extend(members)
                 next_token = None  # 列表格式无分页
