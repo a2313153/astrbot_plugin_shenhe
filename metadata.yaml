@@ -2,4 +2,4 @@ name: astrbot_plugin_shenhe # 这是你的插件的唯一识别名。
 desc: 入群审核。 # 插件简短描述
 version: v1.0.0 # 插件版本号。格式：v1.1.1 或者 v1.1
 author: acg # 作者
-repo:  # 插件的仓库地址
+repo:  https://github.com/a2313153/astrbot_plugin_shenhe # 插件的仓库地址
